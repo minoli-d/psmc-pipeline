@@ -1,0 +1,16 @@
+executor: slurm
+jobs: 300
+latency-wait: 60
+restart-times: 0
+keep-going: true
+rerun-incomplete: true
+use-conda: true
+
+default-resources:
+  slurm_account: "co_genomicdata"
+  slurm_partition: "savio4_htc"
+  slurm_qos: "savio_lowprio"
+  slurm_exclude: "n0074.savio4"
+  runtime: "1h"
+  mem_mb: 4000
+  threads: 1

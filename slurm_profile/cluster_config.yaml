@@ -1,0 +1,35 @@
+__default__:
+  time: "01:00:00"
+  nodes: 1
+  ntasks: 1
+  cpus-per-task: 1
+  account: co_genomicdata
+  partition: savio4_htc
+  qos: savio_lowprio
+  exclude: n0074.savio4
+  extra: ""
+
+filter_vcf:
+  time: "00:15:00"
+  cpus-per-task: 1
+
+mutfa:
+  time: "00:30:00"
+  cpus-per-task: 1
+
+mask:
+  time: "00:30:00"
+  cpus-per-task: 1
+
+fq2psmcfa:
+  time: "00:20:00"
+  cpus-per-task: 1
+
+run_psmc:
+  time: "04:00:00"
+  cpus-per-task: 4
+
+scale_psmc:
+  time: "00:15:00"
+  cpus-per-task: 1
+

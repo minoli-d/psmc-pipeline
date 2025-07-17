@@ -1,0 +1,13 @@
+name: psmc_env
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - bcftools=1.16
+  - perl
+  - seqtk
+  - samtools
+  - psmc
+  - gnuplot
+

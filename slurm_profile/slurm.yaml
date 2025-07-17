@@ -1,0 +1,13 @@
+__default__:
+  time: "{resources.time}"
+  mem: "{resources.mem_mb}M"
+  cpus-per-task: "{threads}"
+  nodes: "1"
+  ntasks: "1"
+  account: "co_genomicdata"
+  partition: "savio4_htc"
+  qos: "savio_lowprio"
+  exclude: "n0074.savio4"
+  output: "logs/{rule}.{wildcards}.out"
+  error: "logs/{rule}.{wildcards}.err"
+  job-name: "smk-{rule}"
