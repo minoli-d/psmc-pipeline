@@ -1,0 +1,840 @@
+---
+title: "PSMC"
+author: "Minoli Daigavane"
+date: "2025-04-07"
+output: github_document
+---
+
+```{r}
+library(purrr)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(plotly)
+library(htmlwidgets)
+library(readr)
+library(ggrepel)
+```
+
+```{r}
+# metadata <- read.csv("/Users/minoli/Documents/research/sv_diversity/docs/assembly_metadata_wide.csv")
+iucn <- read_tsv("/Users/minoli/Documents/research/sv_diversity/my_files/latest_iucn_df.tsv") 
+location <- read_csv("/Users/minoli/Documents/research/sv_diversity/docs/location_data.csv")
+psmc_scaled <- list.files("/Users/minoli/Desktop/scaled_outputs", pattern = "\\.txt$", full.names = TRUE)
+psmc_relative <- list.files("/Users/minoli/Desktop/relative_outputs", pattern = "\\.txt$", full.names = TRUE)
+psmc_scaled_df <- map_dfr(psmc_scaled, ~{
+  df <- read.table(.x, header = FALSE)
+  colnames(df) <- c("Time", "PopSize", "NA1", "NA2", "NA3")
+  df <- df[-1, ]  
+  df <- df %>%
+    transmute(
+      Time = as.numeric(Time) / 1000,  # convert to kya
+      PopSize = as.numeric(PopSize) * 10000,
+      Species = .x %>%
+        basename() %>%
+        str_remove("_scaled.*") %>%
+        str_replace_all("_", " ")
+    )
+  df
+})
+
+psmc_rel_df <- map_dfr(psmc_relative, ~{
+  df <- read.table(.x, header = FALSE)
+  colnames(df) <- c("Time", "PopSize", "NA1", "NA2", "NA3")
+  df <- df[-1, ]  
+  df <- df %>%
+    transmute(
+      Time = as.numeric(Time) / 1000,  # convert to kya
+      PopSize = as.numeric(PopSize) * 10000,
+      Species = .x %>%
+        basename() %>%
+        str_remove("_relative.*") %>%
+        str_replace_all("_", " ")
+    )
+  df
+})
+
+iucn_colors <- c(
+  "CR"    = "#d73027",   # Critically Endangered
+  "EN"    = "#fc8d59",   # Endangered
+  "VU"    = "#fee08b",   # Vulnerable 
+  "NT"    = "#d9ef8b",   # Near Threatened
+  "LC"    = "#1a9850",   # Least Concern
+  "RE"    = "#4575b4",   # Regionally Extinct
+  "DD"    = "#9b9b9b",   # Data Deficient
+  "NE"    = "#cccccc"    # Not Evaluated 
+)
+iucn_levels <- names(iucn_colors)
+
+scaled_psmc_annotated <- psmc_scaled_df %>%
+  left_join(iucn, by = c("Species" = "scientific_name")) %>%
+  left_join((location %>% select("scientific_name", "geo_location", "lat", "lon"))
+            , by = c("Species" = "scientific_name")) %>%
+  mutate(category = factor(category, levels = iucn_levels))
+
+relative_psmc_annotated <- psmc_rel_df %>%
+  left_join(iucn, by = c("Species" = "scientific_name")) %>%
+  left_join((location %>% select("scientific_name", "geo_location", "lat", "lon"))
+            , by = c("Species" = "scientific_name")) %>%
+  mutate(category = factor(category, levels = iucn_levels))
+
+```
+
+
+```{r}
+# by IUCN:
+scaled_psmc_annotated %>%
+  filter(!is.na(category)) %>%
+  ggplot(aes(x = Time, y = PopSize, color = category, group = Species)) +
+  geom_line(alpha = 1) +
+  scale_x_log10() +
+  facet_wrap(~ category, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Demographic Histories by IUCN Category",
+    x = "Thousands of Years Ago (log scale)",
+    y = "Effective Population Size (Ne)"
+  ) +
+  scale_color_manual(values = iucn_colors, na.value = "#cccccc")
+```
+
+
+```{r}
+plot_psmc_interactive <- function(df, facet_var = "taxonomic_group", iucn_filter = NULL) {
+
+  df <- df %>%
+    mutate(category = factor(category, levels = iucn_levels))
+
+  if (!is.null(iucn_filter)) {
+    df <- df %>% filter(category %in% iucn_filter)
+  }
+
+  facet_formula <- as.formula(paste("~", facet_var))
+
+  p <- ggplot(df, aes(
+      x = Time,
+      y = PopSize,
+      group = Species,
+      color = category,
+      text = paste(
+        "Common Name:", common_name,
+        "<br>Species:", Species,
+        "<br>Group:", taxonomic_group,
+        "<br>Status:", category,
+        "<br>Ne:", round(PopSize),
+        "<br>KYA:", round(Time, 1)
+      )
+    )) +
+    geom_line(linewidth = 0.75, alpha = 1) +
+    scale_x_log10() +
+    scale_y_log10() +
+    facet_wrap(facet_formula, scales = "free_y") +
+    scale_color_manual(values = iucn_colors, drop = FALSE, na.value = "#cccccc") +
+    theme_minimal() +
+    labs(
+      title = "Interactive PSMC Plot",
+      x = "Thousands of Years Ago (log)",
+      y = "Effective Population Size (log Ne)",
+      color = "IUCN Status"
+    )
+
+  ggplotly(p, tooltip = "text")
+}
+
+
+
+mammals <- scaled_psmc_annotated %>% filter(taxonomic_group == "mammal")
+birds <- scaled_psmc_annotated %>% filter(taxonomic_group == "bird")
+reptiles <- scaled_psmc_annotated %>% filter(taxonomic_group == "reptile")
+fish <- scaled_psmc_annotated %>% filter(taxonomic_group %in% c("ray-finned fish" ))
+```
+
+```{r, fig.height=3, fig.width=8}
+
+plot_psmc_with_lc_ribbon <- function(
+  scaled_df,
+  relative_df,
+  taxonomic_groups = NULL,
+  iucn_categories = c("CR", "EN", "VU", "NT"),
+  facet_var = NULL,
+  output_html = TRUE,
+  lc_ribbon = TRUE,
+  x_axis = c("years", "generations")
+) {
+  require(ggplot2)
+  require(plotly)
+  require(dplyr)
+  require(rlang)
+  require(htmlwidgets)
+  require(scales)
+
+  x_axis <- match.arg(x_axis)
+
+  if (x_axis == "years") {
+    df <- scaled_df
+    xvar <- "Time"
+    xlabel <- "Thousands of Years Ago"
+  } else {
+    df <- relative_df
+    xvar <- "Time"
+    xlabel <- "Generations Ago"
+  }
+  yvar <- "PopSize"
+  ylabel <- ifelse(x_axis == "years", "Effective Population Size", "Relative Ne")
+
+  # Helper for LC ribbon
+  calculate_lc_ribbon <- function(df, binwidth = 0.15, facet_var = NULL) {
+    x_sym <- sym(xvar)
+    y_sym <- sym(yvar)
+
+    df <- df %>%
+      filter(category == "LC") %>%
+      mutate(K_bin = round(log10(!!x_sym) / binwidth) * binwidth)
+
+    if (!is.null(facet_var)) {
+      facet_sym <- sym(facet_var)
+      df <- df %>%
+        group_by(K_bin, .group = !!facet_sym)
+    } else {
+      df <- df %>%
+        group_by(K_bin)
+    }
+
+    df %>%
+      summarise(
+        !!xvar := median(!!x_sym, na.rm = TRUE),
+        avg = median(!!y_sym, na.rm = TRUE),
+        lower = quantile(!!y_sym, 0.25, na.rm = TRUE),
+        upper = quantile(!!y_sym, 0.75, na.rm = TRUE),
+        .groups = "drop"
+      )
+  }
+
+  # Filter main dataset
+  df_filtered <- df %>%
+    filter(category %in% iucn_categories)
+  if (!is.null(taxonomic_groups)) {
+    df_filtered <- df_filtered %>%
+      filter(taxonomic_group %in% taxonomic_groups)
+  }
+
+  # LC Ribbon data
+  if (lc_ribbon) {
+    df_lc_subset <- df %>%
+      filter(category == "LC") %>%
+      filter(if (!is.null(taxonomic_groups)) taxonomic_group %in% taxonomic_groups else TRUE)
+
+    lc_ribbon_df <- calculate_lc_ribbon(df_lc_subset, binwidth = .25, facet_var = facet_var)
+  }
+
+  # Base plot
+  p <- ggplot(
+    df_filtered,
+    aes(
+      x = !!sym(xvar),
+      y = !!sym(yvar),
+      group = Species,
+      color = category,
+      text = paste(
+        "Common Name:", common_name,
+        "<br>Species:", Species,
+        "<br>Group:", taxonomic_group,
+        "<br>Status:", category,
+        "<br>Ne:", signif(PopSize, 3),
+        "<br>", ifelse(x_axis == "years", "KYA:", "Generations Ago:"), signif(!!sym(xvar), 3)
+      )
+    )
+  ) +
+    geom_line(linewidth = 0.75, alpha = 1) +
+    scale_x_log10(labels = comma_format()) +
+    scale_y_log10(labels = comma_format()) +
+    scale_color_manual(values = iucn_colors, drop = FALSE) +
+    theme_minimal(base_size = 16) +
+    labs(
+      title = "PSMC Trajectories Colored by IUCN Category",
+      x = xlabel,
+      y = ylabel,
+      color = "IUCN Status"
+    ) +
+    theme(
+      panel.spacing = unit(0.2, "lines"),
+      plot.margin = margin(5, 75, 75, 5),
+      legend.position = "right"
+    )
+
+  # Optional facet
+  if (!is.null(facet_var)) {
+    p <- p + facet_wrap(as.formula(paste("~", facet_var)), scales = "free_y")
+  }
+
+  # LC Ribbon overlay
+  if (lc_ribbon) {
+    ribbon_aes <- aes(x = !!sym(xvar), ymin = lower, ymax = upper)
+    line_aes   <- aes(x = !!sym(xvar), y = avg)
+
+    if (!is.null(facet_var)) {
+      ribbon_aes$group <- sym(facet_var)
+      line_aes$group <- sym(facet_var)
+    }
+
+    p <- p +
+      geom_ribbon(data = lc_ribbon_df, mapping = ribbon_aes, inherit.aes = FALSE, fill = "#1a9850", alpha = 0.2) +
+      geom_line(data = lc_ribbon_df, mapping = line_aes, inherit.aes = FALSE, color = "#1a9850", linetype = "dashed", alpha = 0.5, linewidth = 0.8)
+  }
+
+  interactive_plot <- ggplotly(p, tooltip = "text")
+
+  if (output_html) {
+    temp_file <- tempfile(fileext = ".html")
+    saveWidget(interactive_plot, file = temp_file, selfcontained = TRUE)
+    browseURL(temp_file)
+  }
+
+  return(interactive_plot)
+}
+
+
+small_scaled_psmc_annotated <- scaled_psmc_annotated %>% filter(Species %in% sample(unique(scaled_psmc_annotated$Species), 75)) 
+
+small_scaled_psmc_annotated
+
+plot_psmc_with_lc_ribbon(
+  scaled_df = small_scaled_psmc_annotated %>% filter(Time > 10),
+  relative_df = relative_psmc_annotated,
+  taxonomic_groups = NULL,
+  iucn_categories = c('CR', "EN", "VU", "NT"),
+  x_axis = "years",
+  lc_ribbon = TRUE,
+  facet_var = NULL
+)
+
+
+```
+
+
+```{r}
+plot_median_psmc_ribbons <- function(
+  scaled_df,
+  relative_df,
+  taxonomic_groups = NULL,
+  iucn_categories = c("CR", "EN", "VU", "NT", "LC"),
+  facet_var = "taxonomic_group",
+  x_axis = c("years", "generations"),
+  binwidth = 0.15,
+  iucn_colors = iucn_colors,
+  output_html = TRUE
+) {
+  require(ggplot2)
+  require(dplyr)
+  require(rlang)
+  require(plotly)
+  require(htmlwidgets)
+  require(scales)
+  
+  x_axis <- match.arg(x_axis)
+
+  if (x_axis == "years") {
+    df <- scaled_df
+    xvar <- "Time"
+    xlabel <- "Thousands of Years Ago"
+  } else {
+    df <- relative_df
+    xvar <- "Time"
+    xlabel <- "Generations Ago"
+  }
+
+  df_filtered <- df %>%
+    filter(category %in% iucn_categories)
+  if (!is.null(taxonomic_groups)) {
+    df_filtered <- df_filtered %>%
+      filter(!!sym(facet_var) %in% taxonomic_groups)
+  }
+
+  summary_df <- df_filtered %>%
+    mutate(
+      x_bin = round(log10(!!sym(xvar)) / binwidth) * binwidth,
+      x_plot = 10^x_bin
+    ) %>%
+    group_by(category, x_plot, !!sym(facet_var)) %>%
+    summarise(
+      median_Ne = median(PopSize, na.rm=TRUE),
+      mean_Ne = mean(PopSize, na.rm=TRUE),
+      lower = quantile(PopSize, 0.25, na.rm=TRUE),
+      upper = quantile(PopSize, 0.75, na.rm=TRUE),
+      .groups = "drop"
+    )
+
+  p <- ggplot(summary_df, aes(x = x_plot, y = median_Ne, color = category, fill = category)) +
+    geom_line(size = 1.1) +
+    geom_ribbon(
+      aes(ymin = lower, ymax = upper), 
+      alpha = 0.1, 
+      color = NA ) +
+    scale_x_log10(labels = scales::comma_format()) +
+    scale_y_log10(labels = scales::comma_format()) +
+    facet_wrap(as.formula(paste("~", facet_var)), scales = "free_y") +
+    scale_color_manual(values = iucn_colors) +
+    scale_fill_manual(values = iucn_colors) +
+    labs(
+      title = "Median Demographic Trajectory by IUCN Category",
+      x = xlabel,
+      y = ifelse(x_axis == "years", "Effective Population Size", "Relative Ne"),
+      color = "IUCN Status", fill = "none"
+    ) +
+    theme_minimal(base_size = 20) +
+    theme(
+      axis.text = element_text(size = 20)
+    )
+    guides(
+      color = guide_legend(order = 1),
+      fill = "none"  
+      ) 
+  
+  interactive_plot <- ggplotly(p)
+  if (output_html) {
+    temp_file <- tempfile(fileext = ".html")
+    saveWidget(interactive_plot, file = temp_file, selfcontained = TRUE)
+    browseURL(temp_file)
+  }
+  return(interactive_plot)
+}
+
+plot_median_psmc_ribbons(
+  scaled_df = scaled_psmc_annotated %>% filter(Time >= 1),
+  relative_df = relative_psmc_annotated,
+  taxonomic_groups = c("reptile"),
+  iucn_categories = c("CR", "EN", "VU", "NT", "LC"),
+  x_axis = "years",
+  binwidth = 0.2,
+  iucn_colors = iucn_colors,
+  output_html = TRUE
+)
+
+other_vertebrates_df <- scaled_psmc_annotated %>% 
+  mutate(
+    taxonomic_group = case_when(
+      taxonomic_group %in% c("reptile", "amphibian", "jawless fish") ~ "reptiles, amphibians, jawless fish",
+      TRUE ~ taxonomic_group
+    )
+  )
+
+
+plot_median_psmc_ribbons(
+  scaled_df = other_vertebrates_df %>% filter(Time >= 10),
+  relative_df = relative_psmc_annotated,
+  taxonomic_groups = c("reptiles, amphibians, jawless fish"),
+  iucn_categories = c("CR", "EN", "VU", "NT", "LC"),
+  x_axis = "years",
+  binwidth = 0.25,
+  iucn_colors = iucn_colors,
+  output_html = TRUE
+)
+```
+
+```{r fig.height=9, fig.width=10}
+plot_median_faceted_ribbons <- function(
+  df,
+  facet_var = "taxonomic_group",
+  iucn_categories = c("CR", "EN", "VU", "NT", "LC"),
+  binwidth = 0.15,
+  x_axis = "years",
+  iucn_colors = iucn_colors,
+  save_path = "psmc_faceted_plot.pdf"
+) {
+  library(ggplot2)
+  library(dplyr)
+  library(rlang)
+  library(scales)
+
+  xvar <- "Time"
+  xlabel <- ifelse(x_axis == "years", "Thousands of Years Ago", "Generations Ago")
+  yvar <- "PopSize"
+  ylabel <- ifelse(x_axis == "years", "Effective Population Size", "Relative Ne")
+
+  df_filtered <- df %>% filter(category %in% iucn_categories)
+
+  summary_df <- df_filtered %>%
+    mutate(
+      x_bin = round(log10(.data[[xvar]]) / binwidth) * binwidth,
+      x_plot = 10^x_bin
+    ) %>%
+    group_by(category, x_plot, .data[[facet_var]]) %>%
+    summarise(
+      median_Ne = median(.data[[yvar]], na.rm = TRUE),
+      lower = quantile(.data[[yvar]], 0.25, na.rm = TRUE),
+      upper = quantile(.data[[yvar]], 0.75, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    rename(!!facet_var := .data[[facet_var]])
+
+  p <- ggplot(summary_df, aes(x = x_plot, y = median_Ne, color = category, fill = category)) +
+    geom_line(linewidth = 1) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.25, color = NA) +
+    scale_x_log10(labels = label_comma()) + 
+    scale_y_log10(labels = scientific_format(digits = 2)) +
+    scale_color_manual(values = iucn_colors) +
+    scale_fill_manual(values = iucn_colors) +
+    facet_wrap(as.formula(paste("~", facet_var)), ncol = 2, scales = "free_y") +
+    labs(
+      title = "Median Demographic Trajectory by IUCN Category",
+      x = xlabel,
+      y = ylabel,
+      color = "IUCN Status", fill = "none"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      legend.position = c(.75, .15),
+      strip.text = element_text(size = 12, face = "bold"),
+      panel.spacing = unit(0.2, "lines"),
+      plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+      plot.margin = margin(10, 10, 10, 10)
+    ) +
+    guides(fill = "none")
+
+  # Save to letter-size PDF (8.5 x 11 inches)
+  ggsave(
+    filename = "/Users/minoli/Desktop/sp 25/honors/plots/psmc_faceted_plot.png",
+    plot = p,
+    width = 10,
+    height = 9,
+    units = "in",
+    dpi = 300
+  )
+
+  return(p)
+}
+
+
+plot_median_faceted_ribbons(
+  df = other_vertebrates_df %>% filter(Time>=10),
+  iucn_categories = c("CR", "EN", "VU", "NT", "LC"),
+  binwidth = 0.15,
+  x_axis = "years",
+  iucn_colors = iucn_colors
+)
+```
+
+
+
+```{r}
+recent_cutoff <- Inf  # Thousands of years ago
+
+ne_by_species <- scaled_psmc_annotated %>%
+  filter(Time >= 1 & Time <= recent_cutoff) %>%
+  group_by(Species, category, taxonomic_group) %>%
+  summarise(
+    median_Ne = median(PopSize, na.rm = TRUE),
+    mean_Ne = mean(PopSize, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    threat_bin = case_when(
+      category %in% c("CR", "EN", "VU") ~ "Threatened",
+      category %in% c("LC", "NT") ~ "Not Threatened",
+      TRUE ~ NA_character_
+    )
+  )
+
+iucn_order <- c("LC", "NT", "VU", "EN", "CR")  # Adjust if you want to include others
+ne_by_species <- ne_by_species %>%
+  filter(category %in% iucn_order) %>%
+  mutate(category_ord = factor(category, levels = (iucn_order), ordered = TRUE))
+
+p <- ggplot(ne_by_species, aes(x = category_ord, y = median_Ne, fill = category_ord)) +
+  geom_boxplot(outlier.shape = NA, color = "black", alpha=.8) +
+  geom_jitter(width = 0.2, color = "black", alpha = 0.2) +
+  scale_y_log10() +
+  scale_fill_manual(values = iucn_colors) +
+  labs(
+    x = "IUCN Category",
+    y = "Median Ne",
+    title = "Effective Population Size by IUCN Threat Level"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# ggsave("/Users/minoli/Desktop/sp 25/honors/plots/ne_vs_iucn.png", plot = p, width = 10, height = 6, dpi = 1000)
+
+
+p
+```
+
+```{r}
+
+ne_by_species$cat_num <- as.numeric(ne_by_species$category_ord)
+cor_test <- cor.test(ne_by_species$median_Ne, ne_by_species$cat_num, method = "spearman")
+cor_test
+
+```
+
+
+```{r}
+
+wilcox_by_clade <- ne_by_species %>%
+  filter(!is.na(threat_bin)) %>%
+  group_by(taxonomic_group) %>%
+  filter(n_distinct(threat_bin) == 2) %>%  # Only clades with both groups
+  summarise(
+    n_threatened = sum(threat_bin == "Threatened"),
+    n_non_threatened = sum(threat_bin == "Not Threatened"),
+    test = list(wilcox.test(median_Ne ~ threat_bin)),  # Run once
+    statistic = test[[1]]$statistic,
+    p.value = test[[1]]$p.value,
+    significant = p.value <= 0.1
+  ) %>%
+  arrange((p.value)) %>%
+  select(-test)
+
+wilcox_by_clade
+```
+
+```{r fig.height=6, fig.width=8}
+ne_by_species_smaller <- ne_by_species %>% filter(!taxonomic_group %in% c("amphibian", "jawless fish") )
+
+ggplot(ne_by_species_smaller %>% filter(!is.na(threat_bin)),
+       aes(x = threat_bin, y = median_Ne, fill = threat_bin)) +
+  geom_boxplot(outlier.shape = NA, color = "black", alpha = 0.8) +
+  geom_jitter(width = 0.2, color = "black", alpha = 0.25) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("Threatened" = "#d73027", "Not Threatened" = "#1a9850")) +
+  labs(
+    x = NULL,
+    y = "Median Ne",
+    title = "Ne by Threat Across Taxonomic Groups",
+    fill = "Threat Status"
+  ) +
+  facet_wrap(~ taxonomic_group, scales = "free_y") +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+
+```
+
+```{r fig.height=5}
+iucn_bar <- iucn %>%
+  mutate(
+  category_simple = case_when(
+    category %in% c("DD", "NE", "NA") ~ "Unknown",
+    is.na(category) ~ "Unknown",
+    TRUE ~ as.character(category)
+  ),
+    category_simple = factor(category_simple, levels = c("RE", "CR", "EN", "VU", "NT", "LC", "Unknown"))
+  ) %>%
+  count(taxonomic_group, category_simple) %>%
+  group_by(taxonomic_group) %>%
+  mutate(group_total = sum(n)) %>%
+  ungroup() %>%
+  mutate(taxonomic_group = reorder(taxonomic_group, -group_total))
+
+simple_colors <- c(
+  "RE" = "#4575b4",
+  "CR" = "#d73027",
+  "EN" = "#fc8d59",
+  "VU" = "#fee08b",
+  "NT" = "#d9ef8b",
+  "LC" = "#1a9850",
+  "Unknown" = "#cccccc" #combined group
+)
+
+ggplot(iucn_bar, aes(x = taxonomic_group, y = n, fill = category_simple)) +
+  geom_bar(stat = "identity", alpha=.8) +
+  scale_fill_manual(values = simple_colors, name = "Category") +
+  labs(
+    x = "Taxonomic Group",
+    y = "Number of Species",
+    title = "Distribution of IUCN Categories across Taxonomic Groups"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1),
+    panel.grid.major.x = element_blank(),
+    legend.position = c(.9, .6),
+    legend.background = element_rect(fill = "white", color = NA)
+  )
+
+
+ggsave("/Users/minoli/Desktop/sp 25/honors/plots/iucn_dist.png")
+```
+
+```{r fig.height=5, fig.width=13}
+
+# library(httr)
+# library(jsonlite)
+# library(rphylopic)
+# library(dplyr)
+# 
+# target_species <- c(
+#   "Homo sapiens",
+#   "Eubalaena glacialis",         # North Atlantic right whale – steep recent decline
+#   "Marmota vancouverensis",      # Vancouver Island marmot – high ancient Ne
+#   "Orcinus orca",                # Orca – possibly expanding
+#   "Apteryx mantelli",            # Kiwi – dynamic Ne shape
+#   "Carcharodon carcharias",      # Great white shark – mid-range peak
+#   "Gopherus flavomarginatus",    # Bolson tortoise – IUCN mismatch
+#   "Equus przewalskii"            # Przewalski’s horse – reintroduction signal
+# )
+# 
+# target_species <- c(
+# #"Struthio camelus", # USE
+# # "Acanthisitta chloris" # bad
+# # "Tauraco erythrolophus" # bad
+# # "Merops nubicus" # bad
+# # "Opisthocomus hoazin" # bad
+# # "Melopsittacus undulatus" # bad
+# "Cuculus canorus", # USE
+# # "Pelecanus crispus" # bad
+# # "Balearica regulorum gibbericeps", # DECENT but with artifact - use this to show limitations
+# # "Chlamydotis macqueenii", # CAN USE
+# # "Columba livia" # bad
+# 
+# # mammals:
+# "Tursiops truncatus", #  DECENT but with artifact - use this to show limitations
+# # "Balaenoptera acutorostrata"
+# "Capra hircus", # good
+# # "Pan troglodytes",
+# "Homo sapiens", # USE
+# 
+# # reptiles:
+# # "Alligator mississippiensis"
+# "Gavialis gangeticus",
+#   
+# # fish:
+#   "Betta splendens"
+# )
+# 
+# plot_data <- scaled_psmc_annotated %>%
+#   filter(Species %in% target_species) %>%
+#   filter(Time >= 2 & Time <= 10000000)
+# 
+# label_df <- plot_data %>%
+#   group_by(Species) %>%
+#   filter(Time == max(Time)) %>%
+#   slice(1) %>%
+#   ungroup()
+# 
+# min_time <- min(plot_data$Time, na.rm = TRUE)
+# max_time <- max(plot_data$Time, na.rm = TRUE)
+# 
+# 
+# ggplot(plot_data, aes(x = Time, y = PopSize, color = category, group = Species)) +
+#   geom_line(size = 1.5) +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   scale_color_manual(values = iucn_colors) +
+#   theme_minimal(base_size = 18) +
+#   labs(
+#     title = "PSMC-Inferred Population Histories of Key Vertebrate Species",
+#     x = "Thousands of Years Ago",
+#     y = "Effective Population Size (Ne)",
+#     color = ""
+#   ) +
+#   theme(
+#     legend.direction = "horizontal",
+#     legend.position = c(.75, .1),
+#     plot.margin = margin(t = 0, r = 90, b = 0, l = 5)  # leave space for icons
+#   ) +
+#   coord_cartesian(clip = "off", xlim = c(min_time, max_time * 3))
+# 
+# ggsave("/Users/minoli/Desktop/sp 25/honors/plots/individual_curves.png")
+
+```
+
+
+
+```{r fig.width=11}
+# label_df <- plot_data %>%
+#   group_by(Species) %>%
+#   filter(Time == max(Time)) %>%
+#   slice(1)
+# 
+# ggplot(plot_data, aes(x = Time, y = PopSize, color = category, group = Species)) +
+#   geom_line(size = 1) +
+#   geom_text_repel(
+#     data = label_df,
+#     aes(label = Species),
+#     size = 3.3,
+#     direction = "y",
+#     hjust = 0,
+#     segment.color = "grey70",
+#     nudge_x = 1,
+#     max.overlaps = Inf
+#   ) +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   scale_color_manual(values = iucn_colors) +
+#   theme_minimal(base_size = 12) +
+#   labs(
+#     title = "PSMC-Inferred Population Histories of Key Vertebrate Species",
+#     x = "Thousands of Years Ago",
+#     y = "Effective Population Size (Ne)",
+#     color = "IUCN Status"
+#   ) +
+#   theme(legend.position = "right")
+
+```
+
+```{r}
+# 
+# 
+# uk_df <- scaled_psmc_annotated %>%
+#   mutate(uk = grepl("United Kingdom", geo_location, ignore.case = TRUE)) %>%
+#   #filter(grepl("United Kingdom", geo_location, ignore.case = TRUE)) %>%
+#   filter(taxonomic_group %in% c("mammal")) %>%
+#   filter(category %in% c("LC")) %>%
+#   filter(Time >= 50) %>%
+#   group_by(Species) %>%
+#   slice_min(order_by = PopSize, n=1)
+# 
+# ggplot(uk_df, aes(x=uk, y=PopSize)) + geom_boxplot() +  scale_y_log10() 
+# 
+# nonuk_df <- scaled_psmc_annotated %>%
+#   filter(!grepl("United Kingdom", geo_location, ignore.case = TRUE)) %>%
+#   filter(taxonomic_group %in% c("mammal")) %>%
+#   sample(20)
+# 
+# ggplot(uk_df, aes(x = Time, y = PopSize, group = Species, color = uk)) +
+#   geom_line(alpha = 0.8, linewidth = 0.1) +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   theme_minimal() +
+#   
+#   labs(title = "PSMC Curves for Species Sampled in the UK",
+#        x = "Thousands of Years Ago (log)",
+#        y = "Effective Population Size (log Ne)")
+# 
+# uk_df
+# 
+# #compare uk with areas without bottlenecks, check specific time ranges
+
+unique(scaled_psmc_annotated$Species)
+
+```
+```{r}
+# birds:
+"Struthio camelus"
+"Acanthisitta chloris"  
+"Tauraco erythrolophus" 
+"Merops nubicus" 
+"Opisthocomus hoazin"
+"Melopsittacus undulatus"
+"Cuculus canorus"
+"Pelecanus crispus" 
+"Balearica regulorum gibbericeps"
+"Chlamydotis macqueenii"
+"Columba livia"
+
+# mammals:
+"Tursiops truncatus"
+"Balaenoptera acutorostrata" 
+"Capra hircus"
+"Pan troglodytes"
+
+# reptiles:
+"Alligator mississippiensis" 
+"Gavialis gangeticus" 
+```
+
